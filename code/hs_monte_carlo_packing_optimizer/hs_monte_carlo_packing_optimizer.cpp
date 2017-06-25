@@ -38,21 +38,44 @@ struct Particle {
 
 //convenient object to store the details of the simulation
 struct State {
+	//explicitly loaded in
 	int N; //number of particles
 	double L; //box edge length
-	unordered_map<int, double> type_to_diameter;
-	unordered_map<int, string> type_to_atom;
-	vector< Particle > particles;
-	//vector< tuple<double, double, double, int, int> > particles; // <rx, ry, rz, type, atom_number>
+	//unordered_map<int, double> type_to_diameter; //maps type to diameter
+	//unordered_map<int, string> type_to_atom; //maps type to atom for using VMD
+	vector< double > type_to_diameter;
+	vector< string > type_to_atom;
+	vector< Particle > particles; //stores the particles
+	//created via initialization function
+	int num_types;
+	double eta = 0;
+	vector< int > type_to_N_type; //maps particle type to the number of them
+
+	//does any initialization needed after loading in relevant details
+	void Initialize(){
+		//count the number of each type present
+		Particle particle;
+		num_types = type_to_diameter.size();
+		type_to_N_type.clear();
+		type_to_N_type.resize(num_types, 0);
+		for (auto it = particles.begin(); it < particles.end(); it++){
+			particle = *it;
+			eta = eta + pi*pow(type_to_diameter[particle.type], 3) / 6.0;
+			type_to_N_type[particle.type]++;
+		}
+		eta = eta / pow(L, 3);
+	}
+	
 	//eventually store the cell list here
 };
 
 //function definitions
 bool CheckParticleOverlap(State &state, Particle &particle);
-void BinaryRandomSequentialAddition(State &state, double eta, int N, double d1, double d2, int max_attempts = 100000);
+void BinaryRandomSequentialAddition(State &state, double eta, int N, double d0, double d1, int max_attempts = 100000);
 void WriteConfig(string file, State &state);
 void WriteState(string file, State &state);
 void ReadState(string file, State &state);
+bool AttemptParticleTranslation(State &state, Particle &particle, double dx, double dy, double dz);
 void MonteCarlo(State &state, long int steps, double dr_max);
 
 //this will drive everything based on command line input values
@@ -63,12 +86,20 @@ int main(){
 
 	//generate an initial state via binary random addition
 	BinaryRandomSequentialAddition(state, 0.35, 100, 1.0, 1.0);
+	state.Initialize();
+	cout << state.eta << endl;
 
 	//serialize a state
 	WriteState("brsa_conf.state", state);
 
 	//read a serialized state
 	ReadState("brsa_conf.state", state_new);
+	state_new.Initialize();
+	cout << state.eta << endl;
+
+	for (auto it = state.type_to_N_type.begin(); it < state.type_to_N_type.end(); it++){
+		cout << distance(state.type_to_N_type.begin(), it) << "," << *it << endl;
+	}
 
 	//write an xyz file
 	WriteConfig("brsa_conf.xyz", state_new);
@@ -112,13 +143,15 @@ bool CheckParticleOverlap(State &state, Particle &particle){
 }
 
 //using random sequential addition it attempts to generate a packing at some fixed volume fraction (no cell lists used yet)
-void BinaryRandomSequentialAddition(State &state, double eta, int N, double d1, double d2, int max_attempts){
-	double N1 = int(double(N)/2.0);
-	double N2 = N - N1;
+void BinaryRandomSequentialAddition(State &state, double eta, int N, double d0, double d1, int max_attempts){
+	double N0 = int(double(N)/2.0);
+	double N1 = N - N0;
 	state.N = N;
-	state.L = cbrt((N1 / eta)*pow(d1, 3)*pi / 6.0 + (N2 / eta)*pow(d2, 3)*pi / 6.0);
-	state.type_to_diameter[1] = d1; state.type_to_atom[1] = 'A';
-	state.type_to_diameter[2] = d2; state.type_to_atom[2] = 'B';
+	state.L = cbrt((N0 / eta)*pow(d0, 3)*pi / 6.0 + (N1 / eta)*pow(d1, 3)*pi / 6.0);
+	double d_small = (int)(d0 <= d1)*d0 + (int)(d1 < d0)*d1;
+	double d_large = (int)(d0 >= d1)*d0 + (int)(d1 > d0)*d1;
+	state.type_to_diameter.push_back(d_small); state.type_to_atom.push_back("A");
+	state.type_to_diameter.push_back(d_large); state.type_to_atom.push_back("B");
 
 	//random number generator
 	mt19937_64 rng_x, rng_y, rng_z;
@@ -135,7 +168,7 @@ void BinaryRandomSequentialAddition(State &state, double eta, int N, double d1, 
 	//try to insert particles
 	attempt = 0; n = 0;
 	while (attempt < max_attempts && n < N){
-		particle_type = (int)(n < N1) * 1 + (int)(n >= N1) * 2;
+		particle_type = (int)(n < N0) * 0 + (int)(n >= N0) * 1;
 		particle.rx = unif(rng_x); particle.ry = unif(rng_y); particle.rz = unif(rng_z);
 		particle.type = particle_type;
 		particle.index = n;
@@ -183,12 +216,12 @@ void WriteConfig(string file, State &state){
 void WriteState(string file, State &state){
 	ofstream output(file, ios::app);
 	output << state.N << " " << state.L << endl; //save the N and L
-	for (auto it = state.type_to_atom.begin(); it != state.type_to_atom.end(); it++){ //save the map from type to atom
-		output << "(" << it->first << "," << it->second << ")" << " ";
+	for (auto it = state.type_to_atom.begin(); it < state.type_to_atom.end(); it++){ //save the map from type to atom
+		output << "(" << distance(state.type_to_atom.begin(), it) << "," << *it << ")" << " ";
 	}
 	output << endl;
-	for (auto it = state.type_to_diameter.begin(); it != state.type_to_diameter.end(); it++){ //save the map from type to atom
-		output << "(" << it->first << "," << it->second << ")" << " ";
+	for (auto it = state.type_to_diameter.begin(); it < state.type_to_diameter.end(); it++){ //save the map from type to atom
+		output << "(" << distance(state.type_to_diameter.begin(), it) << "," << *it << ")" << " ";
 	}
 	output << endl;
 	Particle particle;
@@ -226,10 +259,12 @@ void ReadState(string file, State &state){
 	//regex_search(line, match, type_and_atom_re);
 	next = sregex_iterator(line.begin(), line.end(), type_and_atom_re);
 	end = sregex_iterator();
+	state.type_to_atom.clear();
 	while (next != end) {
 		match = *next;
 		cout << match.str(1) << "," << match.str(2) << "\n";
-		state.type_to_atom[stoi(match.str(1))] = match.str(2);
+		//state.type_to_atom[stoi(match.str(1))] = match.str(2);
+		state.type_to_atom.push_back(match.str(2));
 		next++;
 	}
 
@@ -237,10 +272,12 @@ void ReadState(string file, State &state){
 	getline(in_file, line);
 	next = sregex_iterator(line.begin(), line.end(), type_and_diameter_re);
 	end = sregex_iterator();
+	state.type_to_diameter.clear();
 	while (next != end) {
 		match = *next;
 		cout << match.str(1) << "," << match.str(2) << "\n";
-		state.type_to_diameter[stoi(match.str(1))] = stod(match.str(2));
+		//state.type_to_diameter[stoi(match.str(1))] = stod(match.str(2));
+		state.type_to_diameter.push_back(stod(match.str(2)));
 		next++;
 	}
 
@@ -249,6 +286,7 @@ void ReadState(string file, State &state){
 	next = sregex_iterator(line.begin(), line.end(), particles_re);
 	end = sregex_iterator();
 	Particle particle;
+	state.particles.clear();
 	while (next != end) {
 		match = *next;
 		particle.rx = stod(match.str(1)); particle.ry = stod(match.str(2)); particle.rz = stod(match.str(3));
@@ -259,32 +297,55 @@ void ReadState(string file, State &state){
 	}
 }
 
+//attempts to translate a particle with periodic wrapping
+bool AttemptParticleTranslation(State &state,  int index, double dx, double dy, double dz){
+	Particle particle_translated = state.particles[index];
+	particle_translated.rx = particle_translated.rx + dx;
+	particle_translated.rx = particle_translated.rx - floor(particle_translated.rx / state.L)*state.L;
+	particle_translated.ry = particle_translated.ry + dy;
+	particle_translated.ry = particle_translated.ry - floor(particle_translated.ry / state.L)*state.L;
+	particle_translated.rz = particle_translated.rz + dz;
+	particle_translated.rz = particle_translated.rz - floor(particle_translated.rz / state.L)*state.L;
+	//check if overlap and make move if possible
+	if (CheckParticleOverlap(state, particle_translated)){
+		state.particles[particle_translated.index] = particle_translated;
+		return true;
+	}
+	else
+		return false;
+}
+
+//attempts to change the particle type and adjust box volume as need be
+/*bool AttemptParticleTypeChange(State &state, int index, int r_type_change){
+	State particle_translated = state;
+
+
+	unordered_map<int, int> type_to_N_type; //maps type to number of this type present
+
+
+
+}*/
+
 //perform monte carlo steps
 void MonteCarlo(State &state, long int steps, double dr_max)
 {
 	//random number generator
-	mt19937_64 rng_x, rng_y, rng_z, rng_index;
-	rng_x.seed(34); rng_y.seed(103); rng_z.seed(333);
-	uniform_real_distribution<double> r_dr(-dr_max, dr_max);
+	mt19937_64 rng_move_type, rng_index, rng_x, rng_y, rng_z, rng_type;
+	rng_move_type.seed(1); rng_index.seed(991); rng_x.seed(34); rng_y.seed(103); rng_z.seed(333); rng_type.seed(6);
 	uniform_int_distribution<int> r_index(0, state.N - 1);
+	uniform_real_distribution<double> r_dr(-dr_max, dr_max);
+	uniform_int_distribution<int> r_type_change(0, 1); //0=shrink, 1=grow
+	bool translation_status;
 
 	//loop and move particles randomly
 	Particle particle_translated;
 	bool overlap_free = true;
 	for (long int i = 0; i < steps; i++){
-		particle_translated = state.particles[r_index(rng_index)];
-		//particle_translated = state.particles[0];
-		particle_translated.rx = particle_translated.rx + r_dr(rng_x);
-		particle_translated.rx = particle_translated.rx - floor(particle_translated.rx / state.L)*state.L;
-		particle_translated.ry = particle_translated.ry + r_dr(rng_y);
-		particle_translated.ry = particle_translated.ry - floor(particle_translated.ry / state.L)*state.L;
-		particle_translated.rz = particle_translated.rz + r_dr(rng_z);
-		particle_translated.rz = particle_translated.rz - floor(particle_translated.rz / state.L)*state.L;
-		overlap_free = CheckParticleOverlap(state, particle_translated);
-		if (overlap_free){
-			state.particles[particle_translated.index] = particle_translated;
-		}
-		//WriteConfig("trajectory.xyz", state);
+		//random translation move
+		translation_status = AttemptParticleTranslation(state, r_index(rng_index), r_dr(rng_x), r_dr(rng_y), r_dr(rng_z));
+
+		//random particle type change
+		//type_change_status = AttemptParticleTypeChange(state, r_index(rng_index), r_type_change);
 
 		if (i % 1000 == 0){
 			cout << i << endl;

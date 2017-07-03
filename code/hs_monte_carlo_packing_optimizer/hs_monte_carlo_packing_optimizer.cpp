@@ -25,6 +25,7 @@
 #include <random>
 #include <regex>
 #include <set>
+#include <omp.h> 
 
 using namespace std;
 
@@ -92,6 +93,12 @@ struct CellList{
 	double L_cell;
 	bool active = false;
 	vector< vector< vector< list<int> > > > cells;
+	vector< tuple<int, int, int> > neighbor_cell_directions = { { make_tuple(1, 0, 0), make_tuple(0, 1, 0), make_tuple(0, 0, 1),
+																  make_tuple(1, 1, 0), make_tuple(1, 0, 1), make_tuple(0, 1, 1),
+																  make_tuple(1, 1, 1),
+																  make_tuple(1, -1, 0), make_tuple(1, 0, -1), make_tuple(0, 1, -1),
+																  make_tuple(-1, 1, 1), make_tuple(1, -1, 1), make_tuple(1, 1, -1)
+															  } };
 
 	//structure the cell list
 	void PrepareCellList(State &state){
@@ -102,6 +109,7 @@ struct CellList{
 		if (active){
 			//if not the same number of cells or if they have not been maintained do not rebuild
 			if (N_cells != N_cells_prev || !active_prev){
+				//cout << "rebuilding cells" << endl;
 				//build the cells
 				int cell_x, cell_y, cell_z;
 				cells.clear();
@@ -131,27 +139,36 @@ struct CellList{
 
 	//swaps a particle from one cell to another
 	void SingleParticleUpdate(Particle &particle_new, Particle &particle_current){
-		int cell_x_new, cell_y_new, cell_z_new;
-		int cell_x_current, cell_y_current, cell_z_current;
-		tie(cell_x_current, cell_y_current, cell_z_current) = FindCell(particle_new);
-		//find the particle in it
-		auto it = find(cells[cell_x_current][cell_y_current][cell_z_current].begin(),
-			cells[cell_x_current][cell_y_current][cell_z_current].end(), particle_current.index);
-		cells[cell_x_current][cell_y_current][cell_z_current].erase(it);
-		cells[cell_x_new][cell_y_new][cell_z_new].push_back(particle_current.index);
+		if (active){
+			int cell_x_new, cell_y_new, cell_z_new;
+			int cell_x_current, cell_y_current, cell_z_current;
+			tie(cell_x_current, cell_y_current, cell_z_current) = FindCell(particle_current);
+			//find the particle in it
+			auto it = find(cells[cell_x_current][cell_y_current][cell_z_current].begin(),
+				cells[cell_x_current][cell_y_current][cell_z_current].end(), particle_current.index);
+			//check to make sure it is there///////////////////////////////////
+			if (it == cells[cell_x_current][cell_y_current][cell_z_current].end()){
+				cout << "Failed to find particle in cell list" << endl; getchar();
+			}
+			////////////////////////////////////////////////////////////////////
+			//perform the swap
+			cells[cell_x_current][cell_y_current][cell_z_current].erase(it);
+			tie(cell_x_new, cell_y_new, cell_z_new) = FindCell(particle_new);
+			cells[cell_x_new][cell_y_new][cell_z_new].push_back(particle_new.index);
+		}
 	}
 };
 
 //function definitions
 bool CheckParticleOverlapRSA(State &state, Particle &particle);
-bool CheckParticleOverlap(State &state, CellList &cell_list, Particle &particle, bool advance_search = false);
+bool CheckParticleOverlap(State &state, CellList &cell_list, Particle &particle);
 bool CheckAllParticleOverlaps(State &state, CellList &cell_list);
 void BinaryRandomSequentialAddition(State &state, double eta, int N, double d0, double d1, int max_attempts = 100000);
 void WriteConfig(string file, State &state);
 void WriteState(string file, State &state);
 void ReadState(string file, State &state);
 bool AttemptParticleTranslation(State &state, CellList &cell_list, Particle &particle, double dx, double dy, double dz);
-bool AttemptParticleTypeChange(State &state, CellList &cell_list, int index, int r_type_change, double r_type_change_accept);
+bool AttemptParticleTypeChange(State &state, CellList &cell_list, int index, double r_type_change_d, double r_type_change_accept);
 void WriteTypeStats(ofstream &type_stats_output, State &state);
 void MonteCarlo(State &state, CellList &cell_list, long int equil_steps, long int prod_steps, long int skip_steps,
 	string simulation_name, double dr_max, double frac_trans);
@@ -165,7 +182,8 @@ int main(){
 	CellList cell_list_new;
 
 	//generate an initial state via binary random addition
-	BinaryRandomSequentialAddition(state, 0.25, 100, 1.0, 1.4);
+	//BinaryRandomSequentialAddition(state, 0.30, 1000, 1.0, 1.4);
+	BinaryRandomSequentialAddition(state, 0.30, 100, 1.0, 2.00);
 	state.Initialize();
 	cell_list.PrepareCellList(state);
 
@@ -189,10 +207,11 @@ int main(){
 
 	//move particles
 	state_new.Initialize();
+	cell_list_new.PrepareCellList(state_new);
 	cout << "t1: " << state.type_to_diameter_ratio[0] << endl;
 	cout << "t2: " << state.type_to_diameter_ratio[1] << endl;
 	getchar();
-	MonteCarlo(state_new, cell_list_new, 0/*200000*/, 1000000, 100, "1_1.4", 0.2, 0.5);
+	MonteCarlo(state_new, cell_list_new, 0/*200000*/, 80000000, 50000, "1_1.4", 0.15, /*0.5*/0.95);
 
 	WriteState("final_conf.state", state_new);
 	WriteConfig("final_conf.xyz", state_new);
@@ -230,44 +249,129 @@ bool CheckParticleOverlapRSA(State &state, Particle &particle){
 	return true;
 }
 
+//checks for a nearest neighbor overlap between two particles and will work for the edge case of the same particle
+bool NearestNeighborOverlap(State &state, Particle &particle1, Particle &particle2){
+	if (particle1.index == particle2.index)
+		return false;
+	double dx, dy, dz, squared_distance, min_squared_distance;
+	dx = particle1.rx - particle2.rx;
+	dy = particle1.ry - particle2.ry;
+	dz = particle1.rz - particle2.rz;
+	dx = dx - round(dx / state.L) * state.L;
+	dy = dy - round(dy / state.L) * state.L;
+	dz = dz - round(dz / state.L) * state.L;
+	squared_distance = pow(dx, 2) + pow(dy, 2) + pow(dz, 2);
+	min_squared_distance = pow(state.type_to_diameter[particle1.type] + state.type_to_diameter[particle2.type], 2) / 4.0;
+	if (squared_distance < min_squared_distance)
+		return true;
+	else
+		return false;
+}
+
 //checks if a specified particle overlaps with another via brute force methods
-bool CheckParticleOverlap(State &state, CellList &cell_list, Particle &particle, bool advance_search){
+bool CheckParticleOverlap(State &state, CellList &cell_list, Particle &particle){
 	Particle existing_particle;
-	double squared_distance;
-	double min_squared_distance;
-	double dx, dy, dz;
 
-	//iterate over existing particles to see if overlap
-	int advance = (int)advance_search*(particle.index + 1);
-	for (auto it = state.particles.begin() + advance; it < state.particles.end(); it++){
-		existing_particle = *it;
-		dx = particle.rx - existing_particle.rx;
-		dy = particle.ry - existing_particle.ry;
-		dz = particle.rz - existing_particle.rz;
-		dx = dx - round(dx / state.L) * state.L;
-		dy = dy - round(dy / state.L) * state.L;
-		dz = dz - round(dz / state.L) * state.L;
+	//check the cell list to see if active, if not just brute force it
+	if (cell_list.active){
+		//get cell that the particle resides in
+		int cell_x_part, cell_y_part, cell_z_part;
+		tie(cell_x_part, cell_y_part, cell_z_part) = cell_list.FindCell(particle);
 
-		squared_distance = pow(dx, 2) + pow(dy, 2) + pow(dz, 2);
-
-		//check for overlap and if found push iterator to end
-		min_squared_distance = pow(state.type_to_diameter[particle.type] + state.type_to_diameter[existing_particle.type], 2) / 4.0;
-		if (squared_distance < min_squared_distance){
-			if (particle.index != existing_particle.index){
-				return false;
+		//loop over neighboring cells
+		//int cell_x, cell_y, cell_z;
+		int cell_x_wrpd, cell_y_wrpd, cell_z_wrpd;
+		for (int cell_x = cell_x_part - 1; cell_x <= cell_x_part + 1; cell_x++){
+			for (int cell_y = cell_y_part - 1; cell_y <= cell_y_part + 1; cell_y++){
+				for (int cell_z = cell_z_part - 1; cell_z <= cell_z_part + 1; cell_z++){
+					cell_x_wrpd = cell_x + (int)(cell_x == -1)*cell_list.N_cells - (int)(cell_x == cell_list.N_cells)*cell_list.N_cells;
+					cell_y_wrpd = cell_y + (int)(cell_y == -1)*cell_list.N_cells - (int)(cell_y == cell_list.N_cells)*cell_list.N_cells;
+					cell_z_wrpd = cell_z + (int)(cell_z == -1)*cell_list.N_cells - (int)(cell_z == cell_list.N_cells)*cell_list.N_cells;
+					//loop over particles 
+					for (auto it = cell_list.cells[cell_x_wrpd][cell_y_wrpd][cell_z_wrpd].begin(); it != cell_list.cells[cell_x_wrpd][cell_y_wrpd][cell_z_wrpd].end(); it++){
+						existing_particle = state.particles[(*it)];
+						if (NearestNeighborOverlap(state, particle, existing_particle))
+							return false;
+					}
+				}
 			}
 		}
+		return true;
 	}
-	return true;
+	//the brute force option if all else fails
+	else{
+		for (auto it = state.particles.begin(); it < state.particles.end(); it++){
+			existing_particle = *it;
+			if (NearestNeighborOverlap(state, particle, existing_particle))
+				return false;
+		}
+		return true;
+	}
 }
 
 //checks for any possible overlap
 bool CheckAllParticleOverlaps(State &state, CellList &cell_list){
-	for (auto it = state.particles.begin(); it < state.particles.end(); it++){
-		if (!CheckParticleOverlap(state, cell_list, *it, true))
-			return false;
+	Particle particle1, particle2;
+	int d_cell_x, d_cell_y, d_cell_z;
+	int cell_x_n, cell_y_n, cell_z_n;
+
+	//check the cell list to see if active, if not just brute force it
+	if (cell_list.active){
+		for (int cell_x = 0; cell_x < cell_list.N_cells; cell_x++){
+			for (int cell_y = 0; cell_y < cell_list.N_cells; cell_y++){
+				for (int cell_z = 0; cell_z < cell_list.N_cells; cell_z++){
+					//check intra cell first
+					for (auto iter1 = cell_list.cells[cell_x][cell_y][cell_z].begin(); iter1 != cell_list.cells[cell_x][cell_y][cell_z].end(); iter1++){
+						auto iter2 = iter1; advance(iter2, 1);
+						for (; iter2 != cell_list.cells[cell_x][cell_y][cell_z].end(); iter2++){
+							particle1 = state.particles[(*iter1)];
+							particle2 = state.particles[(*iter2)];
+							if (NearestNeighborOverlap(state, particle1, particle2))
+								return false;
+						}
+					}
+
+					//check with neighbor cells now
+					for (auto iter = cell_list.neighbor_cell_directions.begin(); iter < cell_list.neighbor_cell_directions.end(); iter++)
+					{
+						//extract displacements to find 1/2 of total neighbors 
+						tie(d_cell_x, d_cell_y, d_cell_z) = *iter; 
+						cell_x_n = cell_x + d_cell_x;
+						cell_y_n = cell_y + d_cell_y;
+						cell_z_n = cell_z + d_cell_z;
+
+						//wrap the cells using periodic boundary conditions
+						cell_x_n = cell_x_n + (int)(cell_x_n == -1)*cell_list.N_cells - (int)(cell_x_n == cell_list.N_cells)*cell_list.N_cells;
+						cell_y_n = cell_y_n + (int)(cell_y_n == -1)*cell_list.N_cells - (int)(cell_y_n == cell_list.N_cells)*cell_list.N_cells;
+						cell_z_n = cell_z_n + (int)(cell_z_n == -1)*cell_list.N_cells - (int)(cell_z_n == cell_list.N_cells)*cell_list.N_cells;
+
+						//loop over the particles in each cell
+						for (auto iter1 = cell_list.cells[cell_x][cell_y][cell_z].begin(); iter1 != cell_list.cells[cell_x][cell_y][cell_z].end(); iter1++){
+							for (auto iter2 = cell_list.cells[cell_x_n][cell_y_n][cell_z_n].begin(); iter2 != cell_list.cells[cell_x_n][cell_y_n][cell_z_n].end(); iter2++){
+								particle1 = state.particles[(*iter1)];
+								particle2 = state.particles[(*iter2)];
+								if (NearestNeighborOverlap(state, particle1, particle2))
+									return false;
+							}
+						}
+					}
+				}
+			}
+		}
+		return true;
 	}
-	return true;
+	//the brute force N^2 option if all else fails
+	else{
+		for (auto iter1 = state.particles.begin(); iter1 < state.particles.end(); iter1++){
+			for (auto iter2 = iter1 + 1; iter2 < state.particles.end(); iter2++){
+				particle1 = *iter1;
+				particle2 = *iter2;
+				if (NearestNeighborOverlap(state, particle1, particle2))
+					return false;
+			}
+		}
+		return true;
+	}
 }
 
 //using random sequential addition it attempts to generate a packing at some fixed volume fraction (no cell lists used yet)
@@ -436,6 +540,7 @@ bool AttemptParticleTranslation(State &state, CellList &cell_list, int index, do
 	particle_translated.rz = particle_translated.rz - floor(particle_translated.rz / state.L)*state.L;
 	//check if overlap and make move if possible
 	if (CheckParticleOverlap(state, cell_list, particle_translated)){
+		cell_list.SingleParticleUpdate(particle_translated, state.particles[index]);
 		state.particles[particle_translated.index] = particle_translated;
 		return true;
 	}
@@ -444,9 +549,23 @@ bool AttemptParticleTranslation(State &state, CellList &cell_list, int index, do
 }
 
 //attempts to change the particle type and adjust all diameters
-bool AttemptParticleTypeChange(State &state, CellList &cell_list, int index, int r_type_change, double r_type_change_accept){
+bool AttemptParticleTypeChange(State &state, CellList &cell_list, int index, double r_type_change_d, double r_type_change_accept){
 	//store the old info
 	int type_current = state.particles[index].type;
+
+	//assymetric 
+	int r_type_change;
+	double weight;
+	if (r_type_change_d < 0.5)
+	{
+		r_type_change = 0;
+		weight = 1.0; // 9.0;
+	}
+	else if (r_type_change_d >= 0.5)
+	{
+		r_type_change = 1;
+		weight = 1.0; // 0.111111;
+	}
 
 	//get new possible type
 	int type_new;
@@ -456,7 +575,7 @@ bool AttemptParticleTypeChange(State &state, CellList &cell_list, int index, int
 		type_new = min((int)state.type_to_N_type.size() - 1, type_current + 1);
 
 	//calculate the acceptance probability for the mixing entropy correction
-	double prob_mix_ent_accept = min(1.0, (double)(state.type_to_N_type[type_new] + 1) / (double)state.type_to_N_type[type_current]);
+	double prob_mix_ent_accept = min(1.0, weight * (double)(state.type_to_N_type[type_new] + 1) / (double)state.type_to_N_type[type_current]);
 	//double prob_mix_ent_accept = 1.0; //REMOVE///////////////
 
 	//accept or reject now so as to not waste time seeing if an overlap
@@ -489,6 +608,11 @@ bool AttemptParticleTypeChange(State &state, CellList &cell_list, int index, int
 		state.type_to_diameter[type] = diameter_0*(*it);
 	}
 
+	//rebuild the cell list if needed (only for the shrink moves as this can invalidate the cell list)
+	CellList cell_list_current = cell_list;
+	//if (r_type_change == 0)
+	cell_list.PrepareCellList(state);
+
 	//check for overlaps
 	bool status = true;
 	if (r_type_change == 0)
@@ -501,6 +625,7 @@ bool AttemptParticleTypeChange(State &state, CellList &cell_list, int index, int
 		state.type_to_N_type[type_new]--;
 		state.particles[index].type = type_current;
 		state.type_to_diameter = type_to_diameter_current;
+		cell_list = cell_list_current;
 		return false;
 	}
 
@@ -523,6 +648,7 @@ void MonteCarlo(State &state, CellList &cell_list, long int equil_steps, long in
 	uniform_int_distribution<int> r_index(0, state.N - 1);
 	uniform_real_distribution<double> r_dr(-dr_max, dr_max);
 	uniform_int_distribution<int> r_type_change(0, 1); //0=shrink, 1=grow
+	uniform_real_distribution<double> r_type_change_db(0.0, 1.0); //0=shrink, 1=grow
 	uniform_real_distribution<double> r_accept(0, 1);
 	bool translation_status, type_change_status;
 	double move_type;
@@ -539,7 +665,7 @@ void MonteCarlo(State &state, CellList &cell_list, long int equil_steps, long in
 			translation_status = AttemptParticleTranslation(state, cell_list, r_index(rng_index), r_dr(rng_x), r_dr(rng_y), r_dr(rng_z));
 		//random particle type change
 		else if (move_type > frac_trans)
-			type_change_status = AttemptParticleTypeChange(state, cell_list, r_index(rng_index), r_type_change(rng_type_change), r_accept(rng_type_change_accept));
+			type_change_status = AttemptParticleTypeChange(state, cell_list, r_index(rng_index), r_type_change_db(rng_type_change), r_accept(rng_type_change_accept));
 
 		//message user
 		if (i % 10000 == 0){
@@ -560,12 +686,17 @@ void MonteCarlo(State &state, CellList &cell_list, long int equil_steps, long in
 			translation_status = AttemptParticleTranslation(state, cell_list, r_index(rng_index), r_dr(rng_x), r_dr(rng_y), r_dr(rng_z));
 		//random particle type change
 		else if (move_type > frac_trans)
-			type_change_status = AttemptParticleTypeChange(state, cell_list, r_index(rng_index), r_type_change(rng_type_change), r_accept(rng_type_change_accept));
+			type_change_status = AttemptParticleTypeChange(state, cell_list, r_index(rng_index), r_type_change_db(rng_type_change), r_accept(rng_type_change_accept));
 
 		//message user
 		if (i % 10000 == 0){
 			cout << "Completed " << i << " steps" << endl;
 			WriteConfig("trajectory.xyz", state);
+		}
+		
+		//rebuild the cell list every now and again 
+		if (i % 40000 == 0){
+			cell_list.PrepareCellList(state);
 		}
 
 		//write out trajectory stats

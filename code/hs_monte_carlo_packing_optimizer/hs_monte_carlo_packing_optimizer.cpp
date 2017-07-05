@@ -26,6 +26,9 @@
 #include <regex>
 #include <set>
 #include <omp.h> 
+//#include <windows.h>  
+
+//volatile DWORD dwStart;
 
 using namespace std;
 
@@ -161,7 +164,9 @@ struct CellList{
 
 //function definitions
 bool CheckParticleOverlapRSA(State &state, Particle &particle);
+bool ParCheckParticleOverlapRSA(State &state, Particle &particle);
 bool CheckParticleOverlap(State &state, CellList &cell_list, Particle &particle);
+bool ParCheckParticleOverlap(State &state, CellList &cell_list, Particle &particle);
 bool CheckAllParticleOverlaps(State &state, CellList &cell_list);
 void BinaryRandomSequentialAddition(State &state, double eta, int N, double d0, double d1, int max_attempts = 100000);
 void WriteConfig(string file, State &state);
@@ -183,7 +188,10 @@ int main(){
 
 	//generate an initial state via binary random addition
 	//BinaryRandomSequentialAddition(state, 0.30, 1000, 1.0, 1.4);
-	BinaryRandomSequentialAddition(state, 0.30, 100, 1.0, 2.00);
+	//dwStart = GetTickCount();
+	BinaryRandomSequentialAddition(state, 0.30, 1000, 1.0, 2.00);
+	//printf_s("%d milliseconds\n", GetTickCount() - dwStart);
+
 	state.Initialize();
 	cell_list.PrepareCellList(state);
 
@@ -211,7 +219,8 @@ int main(){
 	cout << "t1: " << state.type_to_diameter_ratio[0] << endl;
 	cout << "t2: " << state.type_to_diameter_ratio[1] << endl;
 	getchar();
-	MonteCarlo(state_new, cell_list_new, 0/*200000*/, 80000000, 50000, "1_1.4", 0.15, /*0.5*/0.95);
+	//MonteCarlo(state_new, cell_list_new, 0/*200000*/, 80000000, 50000, "1_1.4", 0.15, 0.995/*0.5*//*0.95*/);
+	MonteCarlo(state_new, cell_list_new, 0/*200000*/, 80000000, 200000, "1_2.0", 0.15, 0.995/*0.5*//*0.95*/);
 
 	WriteState("final_conf.state", state_new);
 	WriteConfig("final_conf.xyz", state_new);
@@ -247,6 +256,43 @@ bool CheckParticleOverlapRSA(State &state, Particle &particle){
 		}
 	}
 	return true;
+}
+
+//parallelized analog
+bool ParCheckParticleOverlapRSA(State &state, Particle &particle){
+	Particle existing_particle;
+	double squared_distance;
+	double min_squared_distance;
+	double dx, dy, dz;
+
+	//iterate over existing particles to see if overlap
+	bool overlap_free = true;
+	int N = state.particles.size();
+
+#pragma omp parallel for private(dx, dy, dz, squared_distance, min_squared_distance, existing_particle) shared(overlap_free)
+	for (int i = 0; i < N; i++){
+		if (overlap_free){
+			existing_particle = state.particles[i];
+			dx = particle.rx - existing_particle.rx;
+			dy = particle.ry - existing_particle.ry;
+			dz = particle.rz - existing_particle.rz;
+			dx = dx - round(dx / state.L) * state.L;
+			dy = dy - round(dy / state.L) * state.L;
+			dz = dz - round(dz / state.L) * state.L;
+
+			squared_distance = pow(dx, 2) + pow(dy, 2) + pow(dz, 2);
+
+			//check for overlap and if found push iterator to end
+			min_squared_distance = pow(state.type_to_diameter[particle.type] + state.type_to_diameter[existing_particle.type], 2) / 4.0;
+			if (squared_distance < min_squared_distance){
+				if (particle.index != existing_particle.index){
+					//return false;
+					overlap_free = false;
+				}
+			}
+		}
+	}
+	return overlap_free;
 }
 
 //checks for a nearest neighbor overlap between two particles and will work for the edge case of the same particle
@@ -308,6 +354,53 @@ bool CheckParticleOverlap(State &state, CellList &cell_list, Particle &particle)
 		return true;
 	}
 }
+
+//parallelized version
+bool ParCheckParticleOverlap(State &state, CellList &cell_list, Particle &particle){
+	Particle existing_particle;
+
+	//check the cell list to see if active, if not just brute force it
+	if (cell_list.active){
+		//get cell that the particle resides in
+		int cell_x_part, cell_y_part, cell_z_part;
+		tie(cell_x_part, cell_y_part, cell_z_part) = cell_list.FindCell(particle);
+
+		//loop over neighboring cells
+		bool overlap_free = true;
+		int cell_x, cell_y, cell_z;
+		int cell_x_wrpd, cell_y_wrpd, cell_z_wrpd;
+#pragma omp parallel for private(cell_x, cell_y, cell_z, cell_x_wrpd, cell_y_wrpd, cell_z_wrpd, existing_particle) schedule(dynamic) 
+		for (int dcell_xyz = 0; dcell_xyz < 3 * 3 * 3; dcell_xyz++){
+			//cout << omp_get_thread_num() << endl << endl;
+			if (overlap_free){
+				cell_x = cell_x_part + ((dcell_xyz / 3) / 3) % 3 - 1;
+				cell_y = cell_y_part + (dcell_xyz / 3) % 3 - 1;
+				cell_z = cell_z_part + dcell_xyz % 3 - 1;
+				cell_x_wrpd = cell_x + (int)(cell_x == -1)*cell_list.N_cells - (int)(cell_x == cell_list.N_cells)*cell_list.N_cells;
+				cell_y_wrpd = cell_y + (int)(cell_y == -1)*cell_list.N_cells - (int)(cell_y == cell_list.N_cells)*cell_list.N_cells;
+				cell_z_wrpd = cell_z + (int)(cell_z == -1)*cell_list.N_cells - (int)(cell_z == cell_list.N_cells)*cell_list.N_cells;
+				//loop over particles
+				for (auto it = cell_list.cells[cell_x_wrpd][cell_y_wrpd][cell_z_wrpd].begin(); it != cell_list.cells[cell_x_wrpd][cell_y_wrpd][cell_z_wrpd].end() && overlap_free; it++){
+					existing_particle = state.particles[(*it)];
+					if (NearestNeighborOverlap(state, particle, existing_particle))
+						overlap_free = false;
+				}
+			}
+		}
+		return overlap_free;
+	}
+	//the brute force option if all else fails
+	else{
+		for (auto it = state.particles.begin(); it < state.particles.end(); it++){
+			existing_particle = *it;
+			if (NearestNeighborOverlap(state, particle, existing_particle))
+				return false;
+		}
+		return true;
+	}
+}
+
+
 
 //checks for any possible overlap
 bool CheckAllParticleOverlaps(State &state, CellList &cell_list){
@@ -406,7 +499,7 @@ void BinaryRandomSequentialAddition(State &state, double eta, int N, double d0, 
 		particle.index = n;
 
 		//check for an overlap
-		overlap_free = CheckParticleOverlapRSA(state, particle);
+		overlap_free = ParCheckParticleOverlapRSA(state, particle);
 
 		//add new particle if possible
 		if (overlap_free){
@@ -425,7 +518,7 @@ void BinaryRandomSequentialAddition(State &state, double eta, int N, double d0, 
 	if (attempt < max_attempts)
 		cout << "BRSA completed!" << endl;
 
-	getchar();
+	//getchar();
 }
 
 //take the state and write out an xyz file of it
@@ -677,38 +770,54 @@ void MonteCarlo(State &state, CellList &cell_list, long int equil_steps, long in
 	//production cycle
 	ofstream type_stats_output(simulation_name + "__type_stats.dat", ios::app);
 	cout << endl << "Production cycle..." << endl << endl;
-	for (long int i = 1; i <= prod_steps; i++){
-		//choose a random type of move
-		move_type = r_accept(rng_move_type);
 
-		//random translation move
-		if (move_type <= frac_trans)
-			translation_status = AttemptParticleTranslation(state, cell_list, r_index(rng_index), r_dr(rng_x), r_dr(rng_y), r_dr(rng_z));
-		//random particle type change
-		else if (move_type > frac_trans)
-			type_change_status = AttemptParticleTypeChange(state, cell_list, r_index(rng_index), r_type_change_db(rng_type_change), r_accept(rng_type_change_accept));
+	//int ID;
+	//omp_set_nested(0);
+//#pragma omp parallel private(ID)
+	{
+		//ID = omp_get_thread_num();
 
-		//message user
-		if (i % 10000 == 0){
-			cout << "Completed " << i << " steps" << endl;
-			WriteConfig("trajectory.xyz", state);
+		//if (ID == 1)
+		{
+
+			for (long int i = 1; i <= prod_steps; i++){
+			//choose a random type of move
+			move_type = r_accept(rng_move_type);
+
+			//random translation move
+			if (move_type <= frac_trans){
+				//cout << "hello from thread: " << ID << endl;
+				translation_status = AttemptParticleTranslation(state, cell_list, r_index(rng_index), r_dr(rng_x), r_dr(rng_y), r_dr(rng_z));
+				//cout << "hello from thread: " << ID << endl;
+			}
+			//random particle type change
+			else if (move_type > frac_trans)
+				type_change_status = AttemptParticleTypeChange(state, cell_list, r_index(rng_index), r_type_change_db(rng_type_change), r_accept(rng_type_change_accept));
+
+			//message user
+			if (i % 10000 == 0){
+				cout << "Completed " << i << " steps" << endl;
+				WriteConfig("trajectory.xyz", state);
+			}
+
+			//rebuild the cell list every now and again 
+			if (i % 40000 == 0){
+				cell_list.PrepareCellList(state);
+			}
+
+			//write out trajectory stats
+			if (i % skip_steps == 0){
+				filename = simulation_name + "__type_stats.dat";
+				WriteTypeStats(type_stats_output, state);
+			}
+
+
+			}
+		type_stats_output.close();
 		}
-		
-		//rebuild the cell list every now and again 
-		if (i % 40000 == 0){
-			cell_list.PrepareCellList(state);
-		}
-
-		//write out trajectory stats
-		if (i % skip_steps == 0){
-			filename = simulation_name + "__type_stats.dat";
-			WriteTypeStats(type_stats_output, state);
-		}
-
-
+		//getchar();
+		//cout << "hello from thread: " << ID << endl;
 	}
-	type_stats_output.close();
-
 
 }
 

@@ -1,0 +1,17 @@
+steps_equil=6000000
+hours_equil=-1.0
+steps_prod=1
+hours_prod=26.0
+skip_steps=10000
+dr_max=0.10
+frac_trans=0.97
+frac_swap=0.0000000000001
+seed=0
+
+
+
+
+
+
+frac_trans=0.87
+frac_swap=0.10

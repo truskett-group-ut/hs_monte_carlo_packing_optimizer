@@ -1,0 +1,2 @@
+eta = 0.05
+composition = (A,1.0,128)
